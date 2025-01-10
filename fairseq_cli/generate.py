@@ -297,7 +297,12 @@ def _main(cfg: DictConfig, output_file):
                         ),
                         file=output_file,
                     )
-
+                    print(
+                            "V-{}\t{}".format(
+                                sample_id,
+                                " ".join(map(lambda x: "{:.4}".format(x),
+                                    hypo["vocab_scores"],
+                                        ))), file=output_file,)
                     if cfg.generation.print_alignment == "hard":
                         print(
                             "A-{}\t{}".format(
@@ -400,13 +405,14 @@ def _main(cfg: DictConfig, output_file):
 
 def cli_main():
     parser = options.get_generation_parser()
-    # TODO: replace this workaround with refactoring of `AudioPretraining`
+    # TODO: replace this workaround with refactoring of `AudioP 
     parser.add_argument(
         '--arch', '-a', metavar='ARCH', default="transformer",
         help='Model architecture. For constructing tasks that rely on '
              'model args (e.g. `AudioPretraining`)'
     )
     args = options.parse_args_and_arch(parser)
+    #print("\n", args, "\n\n")
     main(args)
 
 

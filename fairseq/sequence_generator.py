@@ -6,7 +6,7 @@
 import math
 from typing import Dict, List, Optional
 import sys
-
+import numpy as np
 import torch
 import torch.nn as nn
 from fairseq import search, utils
@@ -201,7 +201,7 @@ class SequenceGenerator(nn.Module):
             ],
         )
         net_input = sample["net_input"]
-
+        probabilities=[]
         if "src_tokens" in net_input:
             src_tokens = net_input["src_tokens"]
             # length of the source text being the character length except EndOfSentence and pad
@@ -335,14 +335,17 @@ class SequenceGenerator(nn.Module):
                     incremental_states,
                     self.temperature,
                 )
-
+                # print("get probabilities? ",step, lprobs.shape, file=None)            
             if self.lm_model is not None:
                 lm_out = self.lm_model(tokens[:, : step + 1])
+                #print("lmmodel bit", file=None)
                 probs = self.lm_model.get_normalized_probs(
                     lm_out, log_probs=True, sample=None
                 )
                 probs = probs[:, -1, :] * self.lm_weight
                 lprobs += probs
+               
+            
             # handle prefix tokens (possibly with different lengths)
             if (
                 prefix_tokens is not None
@@ -355,12 +358,11 @@ class SequenceGenerator(nn.Module):
             elif step < self.min_len:
                 # minimum length constraint (does not apply if using prefix_tokens)
                 lprobs[:, self.eos] = -math.inf
-
             lprobs[lprobs != lprobs] = torch.tensor(-math.inf).to(lprobs)
 
             lprobs[:, self.pad] = -math.inf  # never select pad
             lprobs[:, self.unk] -= self.unk_penalty  # apply unk penalty
-
+           
             # handle max length constraint
             if step >= max_len:
                 lprobs[:, : self.eos] = -math.inf
@@ -387,7 +389,17 @@ class SequenceGenerator(nn.Module):
 
             if self.repeat_ngram_blocker is not None:
                 lprobs = self.repeat_ngram_blocker(tokens, lprobs, bsz, beam_size, step)
-
+            #vocabprob = [probs[i,:] for i in range(bsz)]
+            mask = (lprobs == -math.inf)&(lprobs != lprobs)
+            # TODO create entropy vmap func to do it over the batch size automatically sinc ethe last size is just the vocab
+            #entropy = torch.tensor([np.sum(list(map(lambda x: x*math.exp(x), i[i!=-math.inf].cpu().numpy().ravel().tolist()))) for i in vocabprob])
+            #probabilities.extend(entropy)
+            
+            regprobs = torch.exp(lprobs)
+            #entropy = torch.vmap()
+            #probabilities = torch.mul(lprobs*(~mask),regprobs).sum(dim=1)
+            probabilities.append(lprobs)
+            #print("generate ",probabilities, file=None)
             # Shape: (batch, cand_size)
             cand_scores, cand_indices, cand_beams = self.search.step(
                 step,
@@ -432,6 +444,7 @@ class SequenceGenerator(nn.Module):
                     attn,
                     src_lengths,
                     max_len,
+                    probabilities,
                 )
                 num_remaining_sent -= len(finalized_sents)
 
@@ -547,8 +560,8 @@ class SequenceGenerator(nn.Module):
 
             # reorder incremental state in decoder
             reorder_state = active_bbsz_idx
-
-        # sort by score descending
+            
+            # sort by score descending
         for sent in range(len(finalized)):
             scores = torch.tensor(
                 [float(elem["score"].item()) for elem in finalized[sent]]
@@ -607,6 +620,7 @@ class SequenceGenerator(nn.Module):
         attn: Optional[Tensor],
         src_lengths,
         max_len: int,
+        probabilities,
     ):
         """Finalize hypothesis, store finalized information in `finalized`, and change `finished` accordingly.
         A sentence is finalized when {beam_size} finished items have been collected for it.
@@ -617,7 +631,7 @@ class SequenceGenerator(nn.Module):
             bbsz_idx (Tensor):
         """
         assert bbsz_idx.numel() == eos_scores.numel()
-
+        #print(len(probabilities), step, len(probabilities[step]), len(probabilities[step][0]), file=None)
         # clone relevant token and attention tensors.
         # tokens is (batch * beam, max_len). So the index_select
         # gets the newly EOS rows, then selects cols 1..{step + 2}
@@ -631,7 +645,7 @@ class SequenceGenerator(nn.Module):
             if attn is not None
             else None
         )
-
+        #print(bbsz_idx,step, len(probabilities), len(probabilities),file=None)
         # compute scores per token position
         pos_scores = scores.index_select(0, bbsz_idx)[:, : step + 1]
         pos_scores[:, step] = eos_scores
@@ -658,6 +672,21 @@ class SequenceGenerator(nn.Module):
         unfin_idx = bbsz_idx // beam_size
         sent = unfin_idx + torch.index_select(cum_fin_tensor, 0, unfin_idx)
 
+        mask = (probabilities!= -math.inf)
+        # TODO create entropy vmap func to do it over the batch size automatically sinc ethe last size is just the vocab
+            #entropy = torch.tensor([np.sum(list(map(lambda x: x*math.exp(x), i[i!=-math.inf].cpu().numpy().ravel().tolist()))) for i in vocabprob])
+        #probabilities.extend(entropy)
+        vocabprob=[]
+        entropy = torch.vmap(torch.mul)
+        for i in probabilities:
+            regprobs = torch.exp(i)
+            vocabprob.append(torch.nansum(entropy(i, regprobs), dim=1).index_select(0, bbsz_idx))
+        #regprobs = torch.exp(probabilities[-1])
+
+        #vocabprob.append(torch.nansum(entropy(probabilities[-1],regprobs),dim=1).tolist())
+        #print(step, len(vocabprob), file=None)    
+        #print("finalize ", step , bbsz_idx, src_lengths, probabilities,finalized,  file=None)
+
         # Create a set of "{sent}{unfin_idx}", where
         # "unfin_idx" is the index in the current (possibly reduced)
         # list of sentences, and "sent" is the index in the original,
@@ -680,7 +709,7 @@ class SequenceGenerator(nn.Module):
                     hypo_attn = attn_clone[i]
                 else:
                     hypo_attn = torch.empty(0)
-
+                #print("finalized", probabilities, file=None)
                 finalized[sent_list[i]].append(
                     {
                         "tokens": tokens_clone[i],
@@ -688,9 +717,10 @@ class SequenceGenerator(nn.Module):
                         "attention": hypo_attn,  # src_len x tgt_len
                         "alignment": torch.empty(0),
                         "positional_scores": pos_scores[i],
-                    }
+                        "vocab_scores": [i for j in vocabprob for i in j.tolist()], 
+                        }
                 )
-
+                #print(vocabprob[step], file=None)
         newly_finished: List[int] = []
         for unique_s in unique_seen:
             # check termination conditions for this sentence
