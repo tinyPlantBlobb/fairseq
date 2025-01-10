@@ -375,11 +375,7 @@ class SequenceGenerator(nn.Module):
                     lm_out, log_probs=True, sample=None
                 )
                 probs = probs[:, -1, :] * self.lm_weight
-                lprobs += probs
-<<<<<<< HEAD
-
-=======
-               
+                lprobs += probs   
             
             # handle prefix tokens (possibly with different lengths)
             if (
@@ -393,7 +389,6 @@ class SequenceGenerator(nn.Module):
             elif step < self.min_len:
                 # minimum length constraint (does not apply if using prefix_tokens)
                 lprobs[:, self.eos] = -math.inf
->>>>>>> softmaxentropy
             lprobs[lprobs != lprobs] = torch.tensor(-math.inf).to(lprobs)
 
             lprobs[:, self.pad] = -math.inf  # never select pad
